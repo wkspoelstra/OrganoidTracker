@@ -140,7 +140,7 @@ def _to_file_types_str(file_types: List[Tuple[str, str]]) -> str:
         extensions = set()
         for name, extension in file_types:
             extensions.add(extension)
-        file_types = [("All supported file types", ";".join(extensions))] + file_types
+        file_types = [("All supported file types", " ".join(extensions))] + file_types
     return ";;".join((name + "("+extension+ ")" for name, extension in file_types))
 
 
