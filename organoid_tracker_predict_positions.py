@@ -1,33 +1,25 @@
-"""Predictions particle positions using an already-trained convolutional neural network."""
-import gc
+"""Predicts cell positions using an already-trained convolutional neural network."""
 import json
 import math
 import os
-import sys
-import time
+
+import numpy as np
+import tensorflow as tf
+from skimage.feature import peak_local_max
+from tifffile import tifffile
 
 from organoid_tracker.config import ConfigFile, config_type_int
 from organoid_tracker.core.experiment import Experiment
-from organoid_tracker.core.resolution import ImageResolution
+from organoid_tracker.core.position import Position
+from organoid_tracker.core.position_collection import PositionCollection
+from organoid_tracker.image_loading import general_image_loader
 from organoid_tracker.image_loading.channel_merging_image_loader import ChannelMergingImageLoader
 from organoid_tracker.imaging import io
-from organoid_tracker.image_loading import general_image_loader
-from organoid_tracker.core.position_collection import PositionCollection
-from organoid_tracker.core.position import Position
-from skimage.feature import peak_local_max
-from skimage.morphology import erosion
-from tifffile import tifffile
-
 from organoid_tracker.position_detection_cnn.loss_functions import loss, position_precision, overcount, position_recall
-from organoid_tracker.position_detection_cnn.peak_calling import create_prediction_mask, reconstruct_volume
+from organoid_tracker.position_detection_cnn.peak_calling import reconstruct_volume
 from organoid_tracker.position_detection_cnn.prediction_dataset import predicting_data_creator
 from organoid_tracker.position_detection_cnn.split_images import corners_split, reconstruction
 from organoid_tracker.position_detection_cnn.training_data_creator import create_image_list_without_positions
-
-import tensorflow as tf
-import numpy as np
-
-from organoid_tracker.util import bits
 
 experiment = Experiment()
 
@@ -102,7 +94,18 @@ for i in range(len(image_list)):
 corners = corners_split(max_image_shape, patch_shape)
 
 # due to memory constraints only ~10 images can be processed at a given time (depending on patch shape)
-set_size = 1
+set_size = 2
+
+# set relevant parameters
+if not os.path.isfile(os.path.join(_model_folder, "settings.json")):
+    print("Error: no settings.json found in model folder.")
+    exit(1)
+with open(os.path.join(_model_folder, "settings.json")) as file_handle:
+    json_contents = json.load(file_handle)
+    if json_contents["type"] != "positions":
+        print("Error: model is made for working with " + str(json_contents["type"]) + ", not positions")
+        exit(1)
+    time_window = json_contents["time_window"]
 
 # load models
 print("Loading model...")
@@ -110,23 +113,19 @@ model = tf.keras.models.load_model(_model_folder, custom_objects={"loss": loss,
                                                                   "position_precision": position_precision,
                                                                   "position_recall": position_recall,
                                                                   "overcount": overcount})
-
-if not os.path.isfile(os.path.join(_model_folder, "settings.json")):
-    print("Error: no settings.json found in model folder.")
-    exit(1)
-with open(os.path.join(_model_folder, "settings.json")) as file_handle:
-    time_window = json.load(file_handle)["time_window"]
-
 if _debug_folder is not None:
     os.makedirs(_debug_folder, exist_ok=True)
 
 print("Starting predictions...")
 all_positions = PositionCollection()
 
-image_set_count = int(math.ceil(len(image_list) / set_size))
-
+# Create iterator over complete dataset
 prediction_dataset_all = predicting_data_creator(image_list, time_window, corners,
-                                             patch_shape, buffer, max_image_shape)
+                                             patch_shape, buffer, max_image_shape, batch_size = set_size * len(corners))
+prediction_dataset_all_iter = iter(prediction_dataset_all)
+
+# Go over all images
+image_set_count = int(math.ceil(len(image_list) / set_size))
 
 for image_set_index in range(image_set_count):
 
@@ -142,9 +141,8 @@ for image_set_index in range(image_set_count):
     current_set_size = min(len(image_list)-image_set_index*set_size, set_size)
 
     # take relevant part of the tf.Dataset
-    prediction_dataset = prediction_dataset_all.\
-        skip(image_set_index*len(corners)*set_size)\
-        .take(current_set_size*len(corners))
+    prediction_dataset = prediction_dataset_all_iter.get_next()
+    prediction_dataset = tf.data.Dataset.from_tensor_slices(prediction_dataset).batch(1)
 
     # create prediction mask for peak_finding
     prediction_mask_shape = 2*tf.floor(np.sqrt(_peak_min_distance_px ** 2 / 3)) + 1
@@ -158,8 +156,8 @@ for image_set_index in range(image_set_count):
 
     for image, prediction_batch in zip(image_list_subset, predictions):
         # register image information
-        time_point = image._time_point
-        image_offset = image._images.offsets.of_time_point(time_point)
+        time_point = image.time_point
+        image_offset = image.get_image_offset()
         image_shape = list(image.get_image_size_zyx())
 
         # reconstruct image from patches

@@ -4,6 +4,7 @@
 import json
 import os
 import random
+import numpy as np
 from functools import partial
 from os import path
 from typing import Set, Tuple
@@ -17,6 +18,7 @@ from organoid_tracker.core.experiment import Experiment
 from organoid_tracker.image_loading import general_image_loader
 from organoid_tracker.image_loading.channel_merging_image_loader import ChannelMergingImageLoader
 from organoid_tracker.imaging import io
+from organoid_tracker.position_detection_cnn.custom_filters import distance_map
 
 from organoid_tracker.position_detection_cnn.image_with_positions_to_tensor_loader import dataset_writer
 from organoid_tracker.position_detection_cnn.convolutional_neural_network import build_model, tensorboard_callback
@@ -56,7 +58,7 @@ if " " in os.getcwd():
     exit()
 
 print("Hi! Configuration file is stored at " + ConfigFile.FILE_NAME)
-config = ConfigFile("train_network")
+config = ConfigFile("train_position_network")
 
 per_experiment_params = []
 i = 1
@@ -87,7 +89,7 @@ while True:
 time_window = (int(config.get_or_default(f"time_window_before", str(-1))),
                int(config.get_or_default(f"time_window_after", str(1))))
 
-use_tfrecords = config.get_or_default(f"use_tfrecords", str(True), type=config_type_bool)
+use_tfrecords = config.get_or_default(f"use_tfrecords", str(False), type=config_type_bool)
 
 patch_shape = list(
     config.get_or_default("patch_shape", "64, 64, 32", comment="Size in pixels (x, y, z) of the patches used"
@@ -145,16 +147,17 @@ os.makedirs(output_folder, exist_ok=True)
 tensorboard_folder = os.path.join(output_folder, "tensorboard")
 history = model.fit(training_dataset,
                     epochs=epochs,
-                    steps_per_epoch=round(0.8*len(image_with_positions_list)),
+                    steps_per_epoch= round(1*len(image_with_positions_list)),
                     validation_data=validation_dataset,
-                    validation_steps=10,
-                    callbacks=[tensorboard_callback(tensorboard_folder)])
+                    validation_steps=50,
+                    callbacks=[tensorboard_callback(tensorboard_folder), tf.keras.callbacks.EarlyStopping(patience=2, restore_best_weights=True)])
+
 
 print("Saving model...")
-trained_model_folder = os.path.join(output_folder, "trained_model")
+trained_model_folder = os.path.join(output_folder, "model_positions")
 tf.keras.models.save_model(model, trained_model_folder)
 with open(os.path.join(trained_model_folder, "settings.json"), "w") as file_handle:
-    json.dump({"time_window": time_window}, file_handle, indent=4)
+    json.dump({"type": "positions", "time_window": time_window}, file_handle, indent=4)
 
 
 # Sanity check, do predictions on 10 samples of the validation set
@@ -163,16 +166,28 @@ os.makedirs(os.path.join(output_folder, "examples"), exist_ok=True)
 
 
 def predict(image: tf.Tensor, label: tf.Tensor, model: tf.keras.Model) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+
+    dilation = tf.nn.max_pool3d(label, ksize=[1, 3, 3], strides=1, padding='SAME')
+    peaks = tf.where(dilation == label, 1., 0)
+    y_true = tf.where(label > 0.1, peaks, 0)
+
+    label, weights = distance_map(y_true)
+
     return image, model(image, training=False), label
 
 
+#quick_dataset: Dataset = validation_dataset.unbatch().take(10).batch(1)
+
 quick_dataset: Dataset = validation_dataset.unbatch().take(10).batch(1)
+
 predictions = quick_dataset.map(partial(predict, model=model))
 
 for i, element in enumerate(predictions):
 
     array = element[0].numpy()
-    array = array[0, :, :, :, 0]
+    array = array[0, :, :, :, :]
+    array = np.swapaxes(array, 2, -1)
+    array = np.swapaxes(array, -2, -1)
     tifffile.imwrite(os.path.join(output_folder, "examples", "example_input" + str(i) + ".tiff"), array)
 
     array = element[1].numpy()

@@ -1,6 +1,7 @@
 from configparser import RawConfigParser
 import os.path
-from typing import Tuple, Callable, Any, Dict
+from enum import Enum
+from typing import Tuple, Callable, Any, Dict, Type
 
 from organoid_tracker.core import typing
 
@@ -22,6 +23,16 @@ def config_type_json_file(input: str) -> str:
         return input
     if not input.lower().endswith(".json"):
         return input + ".json"
+    return input
+
+
+def config_type_csv_file(input: str) -> str:
+    """A string that will automatically have ".csv" appended to it if it hasn't already (except for empty strings)."""
+    input = config_type_str(input)  # First parse as string
+    if len(input) == 0:
+        return input
+    if not input.lower().endswith(".csv"):
+        return input + ".csv"
     return input
 
 
