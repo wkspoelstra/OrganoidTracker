@@ -1,15 +1,12 @@
 from typing import Dict, Any
 
-import numpy
-from numpy.core.multiarray import ndarray
-
 from organoid_tracker.core import UserError
-from organoid_tracker.core.image_loader import ImageFilter
 from organoid_tracker.core.images import Images
 from organoid_tracker.gui import dialog, option_choose_dialog
 from organoid_tracker.gui.window import Window
-from organoid_tracker.image_loading.channel_merging_image_loader import ChannelMergingImageLoader
-from organoid_tracker.image_loading.noise_suppressing_filters import ThresholdFilter, GaussianBlurFilter
+from organoid_tracker.image_loading.builtin_image_filters import GaussianBlurFilter, MultiplyPixelsFilter, \
+    ThresholdFilter
+from organoid_tracker.image_loading.builtin_merging_image_loaders import ChannelSummingImageLoader
 
 
 def get_menu_items(window: Window) -> Dict[str, Any]:
@@ -29,7 +26,8 @@ def _threshold(window: Window):
     if min_value is None:
         return
 
-    window.get_experiment().images.filters.append(ThresholdFilter(min_value / 100))
+    image_channel = window.display_settings.image_channel
+    window.get_experiment().images.filters.add_filter(image_channel, ThresholdFilter(min_value / 100))
     window.get_gui_experiment().redraw_image_and_data()
 
 
@@ -41,7 +39,8 @@ def _gaussian_blur(window: Window):
     if value % 2 == 0:
         raise UserError("Even number", f"Cannot use the even number {value} - the blur radius must be an odd number.")
 
-    window.get_experiment().images.filters.append(GaussianBlurFilter(value))
+    image_channel = window.display_settings.image_channel
+    window.get_experiment().images.filters.add_filter(image_channel, GaussianBlurFilter(value))
     window.get_gui_experiment().redraw_image_and_data()
 
 
@@ -51,7 +50,8 @@ def _enhance_brightness(window: Window):
     if multiplier is None:
         return
 
-    window.get_experiment().images.filters.append(_IncreaseBrightnessFilter(multiplier))
+    image_channel = window.display_settings.image_channel
+    window.get_experiment().images.filters.add_filter(image_channel, MultiplyPixelsFilter(multiplier))
     window.get_gui_experiment().redraw_image_and_data()
 
 
@@ -78,7 +78,7 @@ def _merge_channels(window: Window):
         # Keep these separate
         channel_groups.append([channels[remaining_channel_id]])
 
-    channel_merger = ChannelMergingImageLoader(images.image_loader(), channel_groups)
+    channel_merger = ChannelSummingImageLoader(images.image_loader(), channel_groups)
     images.image_loader(channel_merger)
     window.get_gui_experiment().redraw_image_and_data()
 
@@ -90,50 +90,20 @@ def _remove_filters(window: Window):
 
     # Undo channel merging
     image_loader = images.image_loader()
-    if isinstance(image_loader, ChannelMergingImageLoader):
+    if isinstance(image_loader, ChannelSummingImageLoader):
         images.image_loader(image_loader.get_unmerged_image_loader())
         removed_count += 1
 
     # Undo filters
-    filters = images.filters
+    image_channel = window.display_settings.image_channel
+    filters = list(images.filters.of_channel(image_channel))
     removed_count += len(filters)
-    filters.clear()
+    images.filters.clear_channel(image_channel)
 
     if removed_count == 1:
-        window.set_status("Removed 1 filter.")
+        window.set_status(f"Removed 1 filter for channel {image_channel.index_one}.")
     else:
-        window.set_status(f"Removed {removed_count} filters.")
+        window.set_status(f"Removed {removed_count} filters for channel {image_channel.index_one}.")
 
     window.get_gui_experiment().redraw_image_and_data()
 
-
-class _IncreaseBrightnessFilter(ImageFilter):
-    _factor: float
-
-    def __init__(self, factor: float):
-        if factor < 0:
-            raise ValueError("factor may not be negative, but was " + str(factor))
-        self._factor = factor
-
-    def filter(self, image_8bit: ndarray):
-        if int(self._factor) == self._factor:
-            # Easy, apply cheap integer multiplication - costs almost no RAM
-
-            # First get rid of things that will overflow
-            new_max = int(255 / self._factor)
-            image_8bit[image_8bit > new_max] = new_max
-
-            # Then do integer multiplication
-            image_8bit *= int(self._factor)
-            return
-
-        # Copying required
-        scaled = image_8bit * self._factor
-        scaled[scaled > 255] = 255  # Prevent overflow
-        image_8bit[...] = scaled.astype(numpy.uint8)
-
-    def copy(self):
-        return _IncreaseBrightnessFilter(self._factor)
-
-    def get_name(self) -> str:
-        return "Increase brightness"
