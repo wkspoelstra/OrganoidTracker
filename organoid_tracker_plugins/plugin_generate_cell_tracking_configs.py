@@ -187,7 +187,7 @@ def _generate_division_training_config(window: Window):
     if save_directory is None:
         return
 
-    config = ConfigFile("train_link_network", folder_name=save_directory)
+    config = ConfigFile("train_division_network", folder_name=save_directory)
     if len(experiments) == 1:
         if not dialog.prompt_yes_no("Experiments", "Only one project is open. Training on a single data set is not"
                                                    " recommended. For a quick test it's fine, but ideally you should have a more"
@@ -203,7 +203,7 @@ def _generate_division_training_config(window: Window):
     config.get_or_default(f"time_window_before", str(-1))
     config.get_or_default(f"time_window_after", str(1))
 
-    config.get_or_default(f"use_TFRecords", str(False))
+    config.get_or_default(f"use_tfrecords", str(False))
 
     i = 0
     for index, experiment in enumerate(experiments):
